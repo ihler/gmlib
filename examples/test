@@ -1,0 +1,8 @@
+#!/bin/bash
+
+../bin/wmb -T PR -f /scratch/data/uai/pedigree/pedigree20.uai -m 2000 -o50 -t5 -i5 -n10 --stoptime 60 --damp 1.0 --stepw 0.1
+
+../bin/wmb_is -T PR -f /scratch/data/uai/pedigree/pedigree20.uai -m 2000 -o50 -t5 -i5 -n10 --stoptime 60 --damp 1.0 --stepw 0.1 -s1e5 -c0.05
+
+
+
