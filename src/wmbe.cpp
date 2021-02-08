@@ -1,3 +1,4 @@
+// Last revised by qlou on 09//11/15: set flag for pseudoTree in wmbe::init()
 #include <assert.h>
 #include <iostream>
 #include <limits>
@@ -59,6 +60,44 @@ wmbe& wmbe::operator=(wmbe const& gm) {
 }
 */
 
+/////// TODO QI LOU CODE  /////////////////////////////////////////////////////////////////////////////////////////////////////
+//
+void wmbe::init(bool isAndOr) {
+  _obj = 0.0;
+  if (_order.size()==0) {               // if we need to construct an elimination ordering
+    double tic=timeSystem();
+     _order=graphModel::order(ordMethod);
+		 _priority.clear();
+     _parents.clear();                   // (new elim order => need new pseudotree) TODO !!! should do together
+     std::cout<<"Order in "<<timeSystem()-tic<<" sec\n";
+  }
+	if (_priority.size()==0) {
+		_priority.resize(_order.size());
+		for (size_t i=0;i<_order.size();++i) _priority[_order[i]]=i;
+	}
+  if (_parents.size()==0) {             // if we need to construct a pseudo-tree
+    double tic=timeSystem();
+  //  _parents=graphModel::pseudoTree(_order);
+    _parents=graphModel::pseudoTree(_order, isAndOr); // qlou: allow you to choose AND/OR or OR, 6/16/2016
+    std::cout<<"Pseudo in "<<timeSystem()-tic<<" sec\n";
+  }
+
+  // skip preprocessing message passing (do in other ways?)
+
+	_nodes.clear(); _nodes.resize(_order.size());
+	_match.clear(); _match.resize(_order.size());
+	_heuristic.clear(); _heuristic.resize(_order.size());
+  _nodeList.clear();
+	_factorIn.resize( nFactors() );
+	for (size_t f=0;f<factors().size();++f) {
+		nodeID n = addNodeBasic( factor(f).vars() );
+		node(n).origFactors.push_back(f);
+		_factorIn[f] = n;
+	}
+
+	_elim.clear(); _elim.resize(nvar());	// !!! ??? TODO???
+}
+
 void wmbe::init() {
   _obj = 0.0;
   if (_order.size()==0) {               // if we need to construct an elimination ordering
@@ -74,7 +113,9 @@ void wmbe::init() {
 	}
   if (_parents.size()==0) {             // if we need to construct a pseudo-tree
     double tic=timeSystem();
-    _parents=graphModel::pseudoTree(_order);
+  //  _parents=graphModel::pseudoTree(_order);
+/////// TODO QI LOU CODE  /////////////////////////////////////////////////////////////////////////////////////////////////////
+    _parents=graphModel::pseudoTree(_order, false); // qlou: false, just OR, 6/16/2016
     std::cout<<"Pseudo in "<<timeSystem()-tic<<" sec\n";
   }
 
@@ -221,6 +262,47 @@ void wmbe::build() { //size_t iBound, size_t sBound) {
 	}
 }
 
+/////// TODO QI LOU CODE  /////////////////////////////////////////////////////////////////////////////////////////////////////
+// Qi: 1/6/18
+void wmbe::setMsgFwdRep(const int K) {
+/*
+ * Designed for the augmented graphical model
+ * Mark those mini-buckets (nodes) if it is a SUM variable and its forward messages go to a MAX variable
+ * Also, replicate those factors that only involve MAX variables
+ * Caveat: run after "setTheta" but before "msgFowardAug". we assume NO variable change in each mini-bucket (node) after "build"
+ */
+	_K = K; // assign once
+	// top-down, reverse ordering
+	for (int b = _nodes.size() - 1; b >= 0; --b) {
+		// Caveat: do not use "size_t b", it converts "-1" to a lager positive number when compared with "0"
+		Var X = var(_order[b]);
+		bool isMaxVar = _maxVars.contains(X);
+		for (nodeList::iterator ni = _nodes[b].begin(); ni != _nodes[b].end(); ++ni) {
+			node(*ni).vid = X.label();
+			// if a Max variable, its parent cannot be a SUM variable
+			if (isMaxVar) {
+				// replicate its thetas.
+				// note that a theta merely involves MAX variables
+				// iff it is in a MAX variable's mini-bucket due to the constrained elimination ordering
+				node(*ni).theta *= K;
+				continue;
+			}
+			// if this mini-bucket has no parent, set to be true
+			// for a SUM variable, set "isMsgFwdRep" to be "true" if 1) no parent; 2) parent is a Max variable.
+			auto par = node(*ni).parent;
+			if (par == NULL) {
+				node(*ni).isMsgFwdRep = true;
+			} else {
+				// debug, remove it
+				assert(node(par).vid >=0 && node(par).vid < nvar());
+				//
+				Var Y = var(node(par).vid);
+				node(*ni).isMsgFwdRep = _maxVars.contains(Y);
+			}
+		}
+	}
+}
+
 // Use setTheta after init() and build() to write the model factors into the mini-buckets
 void wmbe::setTheta() {
 	for (size_t f=0;f<_factorIn.size();++f)
@@ -256,13 +338,26 @@ void wmbe::setElimType(Var v, ElimType elimType) {
 	_elim[v] = elimType;
 	bucketID b = _priority[v];
 	vector<nodeID>::iterator ni=_nodes[b].begin();
-	double wt;
+	double wt = 0.0;
 	size_t nNodes = _nodes[b].size();
 	switch (elimType) {
 		case ElimType::MaxUpper:	wt = 1e-6; break;
 		case ElimType::SumUpper:	wt = 1.0 / nNodes;  break;
 		case ElimType::SumBethe:	wt = 1.0; break;	// !!! TODO
 		case ElimType::SumLower:	wt = 1.0; if (nNodes > 1) { node(*ni).weight = 2.0; ++ni; wt = -1.0/(nNodes-1); } break;
+/////// TODO QI LOU CODE  /////////////////////////////////////////////////////////////////////////////////////////////////////
+/*		// add new type for MMAP task
+		case ElimType::MaxSumUpper:
+			if (_maxVars.contains(v)) {
+//				setElimType(v, ElimType::MaxUpper);
+				// MaxUpper
+				wt = 1e-6;
+			} else {
+//				setElimType(v, ElimType::SumUpper);
+				// SumUpper
+				wt = 1.0 / nNodes;
+			}
+			break;*/
 	}
 	// TODO: more involved ways of setting the weights?
 	for (;ni!=_nodes[b].end();++ni) node(*ni).weight = wt;
@@ -438,6 +533,83 @@ double wmbe::msgForward(bucketID b, double dampTheta, double stepWeights) {
 	return obj;
 }
 
+/////// TODO QI LOU CODE  /////////////////////////////////////////////////////////////////////////////////////////////////////
+// Qi: 12/2/2017
+// forward message passing for an augmented graphical model
+// that is augmented from the original one by adding multiple (say, K) identical copies of SUM variables.
+// particularly used for "mmapIS".
+// every message sent from a SUM variable to a MAX variable will be raised to the K-th power;
+// every factor only involves MAX variables should be raised to the K-th power as well.
+// Caveat: this may not be compatible with msgBackward. TODO: create a function "msgBackwardAug"?
+// In principle, we still treat this as a summation problem instead of MMAP -- easy for implementation
+double wmbe::msgForwardAug(bucketID b, double dampTheta, double stepWeights, const int K) {
+/*
+ * K: no. of copies of SUM variables
+ */
+	Var X = var(_order[b]);
+	bool isMaxVar  = _maxVars.contains(X);
+	double obj = 0.0;
+//	Var X = var(_order[b]);
+	size_t nNodes = _nodes[b].size();    // !!! "  "
+// Qi: matching CAN be removed when debugging
+	if (nNodes > 1) {                    // If more than one mini-bucket:
+		if (dampTheta > 0.0 || stepWeights > 0.0) // compute beliefs if needed for matching
+			for (nodeList::iterator ni = _nodes[b].begin(); ni != _nodes[b].end(); ++ni)
+				node(*ni).belief = computeNodeBelief(*ni);
+
+		if (dampTheta > 0.0)
+			for (size_t m = 0; m < _match[b].size(); ++m) // count over list of matches
+				updateTheta(b, dampTheta, _match[b][m], true);// update, maintain beliefs
+
+		if (stepWeights > 0.0)
+			updateWeights(b, stepWeights);
+	} // end: matching updates if more than one mini-bucket
+
+	// Compute forward messages:
+	for (nodeList::iterator ni = _nodes[b].begin(); ni != _nodes[b].end(); ++ni) {
+		node(*ni).belief = Factor(0.0);				// clear to save memory
+		Factor bel = node(*ni).theta;			// and build "forward" belief
+
+		// debug only
+		assert(node(*ni).vid == X.label());
+
+		for (nodeList::iterator ci = node(*ni).children.begin(); ci != node(*ni).children.end(); ++ci) {
+			// whether message from this child has to be raised to the K-th power
+			if (node(*ci).isMsgFwdRep){
+				bel += K * node(*ci).msgFwd; // message from a Sum variable to a Max variable
+			} else {
+				bel += node(*ci).msgFwd;
+			}
+			// debug
+			if (node(*ci).isMsgFwdRep) {
+				Var Y = var(node(*ci).vid);
+				assert( isMaxVar &&  !_maxVars.contains(Y));
+			} else {
+				Var Y = var(node(*ci).vid);
+				assert( !isMaxVar ||  _maxVars.contains(Y));
+			}
+		}
+		// bel *= 1.0/node(*ni).weight;
+		// node(*ni).msgFwd = bel.logsumexp(X)*node(*ni).weight;	// use "into" form?
+		// if (_calcBeliefs) bel += msgBwd * 1/wt??; **marginalize into variables, factors? **
+		node(*ni).msgFwd = (bel * (1.0 / node(*ni).weight)).logsumexp(X) * node(*ni).weight; // power-lse
+		// //_msgFwd[j] = bel[j].logsumexpPower(X, 1.0/_weight[n]);  // take power-lse TODO
+		if (node(*ni).parent == NULL) {
+			// to compute the total bound
+			if (node(*ni).isMsgFwdRep) {
+				obj += K * node(*ni).msgFwd[0];
+				// debug
+				assert(!isMaxVar);
+			} else {
+				obj += node(*ni).msgFwd[0]; // add roots to overall bound
+				// debug
+				assert(isMaxVar);
+			}
+		}
+	} // end: forward messages
+	return obj;
+}
+
 void wmbe::msgBackward(bucketID b, double dampTheta, double stepWeights) {
 	size_t nNodes = _nodes[b].size();
   // TODO: consider matching steps here?
@@ -470,6 +642,84 @@ double wmbe::memory() {
   return (mem + maxTemp)/1000000;
 }
 
+
+/////// TODO QI LOU CODE  /////////////////////////////////////////////////////////////////////////////////////////////////////
+unsigned wmbe::getNumberOfMiniBuckets(Var v) const {
+	// get the number of mini-buckets for a variable
+	return _nodes[_priority[v]].size();
+}
+// TODO what's the right way to do this?
+double wmbe::eliminateFromNow(std::set<Var>& frontier, std::set<Var>& subtree) const {
+	// perform exact elimination from a given set of leaf nodes (current frontier)
+	// this helps to upper bound the gain from search reaching a given depth (or explored subgraph/subtree), bound of the oracle
+	// note: this is a naive implementation, not suitable for large models
+	// vars contains the current frontier
+	// double obj = 0.0;
+	// create a huge factor, naive
+	Factor bulk(0.0);
+	// compute thetas for each node in the given sub(andor)tree
+	for (auto iter = subtree.cbegin(); iter != subtree.cend(); ++iter) {
+		Var v = *iter;
+		size_t b = _priority[v];	// find bucket to examine
+		// double heur = 0.0;
+		for (nodeList::const_iterator ni=_nodes[b].begin();ni!=_nodes[b].end();++ni) {
+			// heur += node(*ni).theta.logsumexp();
+			bulk += node(*ni).theta;
+		}
+		// obj += heur;
+	}
+	// compute messages passing by/into buckets of each node on the frontier
+	for (auto iter = frontier.cbegin(); iter != frontier.cend(); ++iter) {
+		Var v = *iter;
+		size_t b = _priority[v];	// find bucket to examine
+		// double heur = 0.0;
+		for (nodeList::const_iterator ci=_heuristic[b].begin();ci!=_heuristic[b].end();++ci) {
+			// heur += node(*ci).msgFwd.logsumexp();
+			bulk += node(*ci).msgFwd;
+		}
+		// obj += heur;
+	}
+	// return obj;
+	return bulk.logsumexp();
+}
+
+/////// TODO QI LOU CODE  /////////////////////////////////////////////////////////////////////////////////////////////////////
+vector<Factor> wmbe::getCurrentModel(std::set<Var>& frontier, std::set<Var>& subtree) const {
+	// TODO ATI check Qi's code; add delta functions for assigned variables, nothing (?) for unassigned missing (?)
+	vector<Factor> fs;
+	fs.clear();
+	for (auto iter = subtree.cbegin(); iter != subtree.cend(); ++iter) {
+		Var v = *iter;
+		size_t b = _priority[v];	// find bucket to examine
+		// double heur = 0.0;
+		for (nodeList::const_iterator ni=_nodes[b].begin();ni!=_nodes[b].end();++ni) {
+			// heur += node(*ni).theta.logsumexp();
+			fs.push_back(node(*ni).theta);
+		}
+	}
+	for (auto iter = frontier.cbegin(); iter != frontier.cend(); ++iter) {
+		Var v = *iter;
+		size_t b = _priority[v];	// find bucket to examine
+		// double heur = 0.0;
+		for (nodeList::const_iterator ci=_heuristic[b].begin();ci!=_heuristic[b].end();++ci) {
+			// heur += node(*ci).msgFwd.logsumexp();
+			fs.push_back(node(*ci).msgFwd);
+		}
+		// obj += heur;
+	}
+	// add factors for those variables not included to make the model consistent with the original one
+	// it might avoid some inconsistency issue.
+	for (auto iter = _order.cbegin(); iter != _order.cend(); ++iter) {
+		Var v = var(*iter);
+		if (subtree.find(v) == subtree.end()) {
+			// if not in subtree
+			Factor dummy(v,0.0);
+			fs.push_back(dummy);
+		}
+	}
+
+	return fs;
+}
 
 /*
 mex::vector<uint32_t> wmbe::maxSequential() {	// don't need order or isLog for wmb

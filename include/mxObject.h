@@ -164,7 +164,7 @@ public:
   bool mxCheckValid(const mxArray* m) { return (m!=NULL); }
   void mxSet(mxArray* m) { M_=m; }
   mxArray* mxGet() { if (!M_) throw std::runtime_error("Can't mxGet a null"); return M_; }
-  mxAny& operator=(const mxObject& c) { assert(c.mxAvail()); mxCopy(c.M_); }
+  mxAny& operator=(const mxObject& c) { assert(c.mxAvail()); mxCopy(c.M_); return *this; }
   void mxRelease() { mxInit(); } //!!!
   void mxDestroy() { } //!!!
 };
